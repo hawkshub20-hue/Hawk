@@ -1,0 +1,62 @@
+rules_version = '2';
+
+// Who can do what. Google's servers enforce these rules, whatever a phone or the website sends.
+//   Staff  (anyone who opens the site): read the schedule, clock in and out of a scheduled shift.
+//   Managers (Google accounts listed below): everything else.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ▼ Put each manager's Google account here, in lowercase, in quotes, separated by commas. ▼
+    function managerEmails() {
+      return ['owner@example.com'];
+    }
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isManager() {
+      return signedIn()
+        && request.auth.token.get('email_verified', false) == true
+        && request.auth.token.get('email', '').lower() in managerEmails();
+    }
+
+    // A staff clock-in: only for a shift that's on the schedule, copied exactly, stamped with the server's clock.
+    function validClockIn(board, week, shiftId) {
+      let s = get(/databases/$(database)/documents/shiftboards/$(board)).data.shifts[shiftId];
+      let p = request.resource.data;
+      let fields = ['name', 'area', 'day', 'start', 'end', 'clockIn', 'clockOut'];
+      return week.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && p.keys().hasAll(fields) && p.keys().hasOnly(fields)
+        && p.name == s.name && p.area == s.get('area', '') && p.day == s.day
+        && p.start == s.start && p.end == s.end
+        && p.clockIn == request.time && p.clockOut == null;
+    }
+
+    // A staff clock-out: only once, only the clock-out time, stamped with the server's clock.
+    function validClockOut() {
+      return resource.data.clockOut == null
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['clockOut'])
+        && request.resource.data.clockOut == request.time;
+    }
+
+    match /shiftboards/{board} {
+      allow read: if signedIn();
+      allow write: if isManager();
+
+      // The manager PIN. Only managers can read or change it.
+      match /private/{doc} {
+        allow read, write: if isManager();
+      }
+
+      match /weeks/{week}/punches/{shiftId} {
+        allow read: if signedIn();
+        allow create: if isManager() || (signedIn() && validClockIn(board, week, shiftId));
+        allow update: if isManager() || (signedIn() && validClockOut());
+        allow delete: if isManager();
+      }
+    }
+
+    // Everything else in the database stays locked.
+  }
+}
